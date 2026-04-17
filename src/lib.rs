@@ -23,6 +23,10 @@ pub mod util;
 
 pub use news_engine::{NewsDispatchEngine, NewsEngineConfig};
 
+// Re-export the underlying probe-policy type so downstream crates (nzb-web,
+// Arz, ...) can configure it without depending on nzb-news directly.
+pub use nzb_news::ServerProbePolicy;
+
 // Convenience re-exports — the types downstream crates reach for.
 pub use article_failure::{ArticleFailure, ArticleFailureKind};
 pub use bandwidth::{BandwidthConfig, BandwidthLimiter};

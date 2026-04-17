@@ -71,6 +71,16 @@ pub struct NewsEngineConfig {
     pub max_concurrent_fetches: usize,
     pub work_channel_capacity: usize,
     pub outcome_channel_capacity: usize,
+    /// Optional backup-server probe policy. Forwarded verbatim to
+    /// `nzb_news::DownloaderConfig::probe_policy`.
+    ///
+    /// `None` disables probing (every cascade article tries every server).
+    /// `Some(_)` enables fast-fail on a backup server when the probed
+    /// hit-rate falls below the threshold for that job.
+    ///
+    /// Defaults to `Some(ServerProbePolicy::default())` which matches the
+    /// nzb-news default (probe 10 articles, require >=10% hits).
+    pub probe_policy: Option<nzb_news::ServerProbePolicy>,
 }
 
 impl NewsEngineConfig {
@@ -81,6 +91,7 @@ impl NewsEngineConfig {
             max_concurrent_fetches: DEFAULT_MAX_CONCURRENT_FETCHES,
             work_channel_capacity: DEFAULT_WORK_CHANNEL_CAPACITY,
             outcome_channel_capacity: DEFAULT_OUTCOME_CHANNEL_CAPACITY,
+            probe_policy: Some(nzb_news::ServerProbePolicy::default()),
         }
     }
 }
@@ -177,6 +188,7 @@ impl DispatchEngine for NewsDispatchEngine {
             article_timeout: cfg.article_timeout,
             work_channel_capacity: cfg.work_channel_capacity,
             outcome_channel_capacity: cfg.outcome_channel_capacity,
+            probe_policy: cfg.probe_policy.clone(),
         };
         let (handle, outcomes) = nzb_news::spawn_downloader(dl_config);
 
