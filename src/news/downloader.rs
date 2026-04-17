@@ -32,9 +32,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{debug, info, trace, warn};
 
 use crate::news::article::{Article, NzbFile, NzbObject};
-use crate::news::dispatch::{
-    Selection, cascade_reset, record_article_given_up, select_server,
-};
+use crate::news::dispatch::{Selection, cascade_reset, record_article_given_up, select_server};
 use crate::news::news_wrapper::NewsWrapper;
 use crate::news::penalty::{PenaltyAction, penalty_for_error};
 use crate::news::server::Server;
@@ -304,7 +302,8 @@ pub fn spawn_downloader(
         .map(|s| ServerQueue::new(s.clone()))
         .collect();
 
-    let (scheduler_tx, scheduler_rx) = mpsc::channel::<SchedulerMsg>(config.work_channel_capacity.max(1));
+    let (scheduler_tx, scheduler_rx) =
+        mpsc::channel::<SchedulerMsg>(config.work_channel_capacity.max(1));
 
     // Spawn wrapper worker tasks. Each owns one NewsWrapper for its
     // lifetime; the Server's idle/busy sets aren't used by this path
@@ -505,9 +504,7 @@ async fn dispatch_pending(
     // another selection path (WaitRampup, CascadeReset, GiveUp) are
     // handled inline but the route-to-server path accumulates batches so
     // we can push per-server in a single mutex-locked call.
-    let mut per_server: Vec<Vec<WorkItem>> = (0..servers.len())
-        .map(|_| Vec::new())
-        .collect();
+    let mut per_server: Vec<Vec<WorkItem>> = (0..servers.len()).map(|_| Vec::new()).collect();
     let mut give_ups: Vec<WorkItem> = Vec::new();
 
     let mut i = 0;
@@ -562,10 +559,7 @@ async fn dispatch_pending(
 
     // Emit Failed outcomes for any articles that were given up on.
     for item in give_ups {
-        let err_msg = format!(
-            "all servers exhausted for {}",
-            item.article.message_id
-        );
+        let err_msg = format!("all servers exhausted for {}", item.article.message_id);
         trace!(tag = item.tag, "article given up at dispatch-time");
         let _ = outcome_tx
             .send(FetchOutcome::Failed {
@@ -765,13 +759,8 @@ async fn wrapper_worker(
         }
 
         // Run pipelined fetch.
-        let per_item_results = fetch_batch_pipelined(
-            &mut wrapper,
-            &server,
-            &batch,
-            article_timeout,
-        )
-        .await;
+        let per_item_results =
+            fetch_batch_pipelined(&mut wrapper, &server, &batch, article_timeout).await;
 
         // Hand results back to the scheduler.
         for (item, result) in per_item_results {
@@ -897,7 +886,8 @@ async fn fetch_batch_pipelined(
 
     // Map pipeline results (by tag) back to items (by index).
     use std::collections::HashMap;
-    let mut by_tag: HashMap<u64, Result<Vec<u8>, NntpError>> = HashMap::with_capacity(per_item.len());
+    let mut by_tag: HashMap<u64, Result<Vec<u8>, NntpError>> =
+        HashMap::with_capacity(per_item.len());
     for r in per_item {
         let res = match r.result {
             Ok(resp) => {

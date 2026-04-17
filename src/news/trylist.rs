@@ -57,10 +57,7 @@ impl TryList {
     /// higher-priority server comes back online and we want to give it
     /// another shot, or when a higher-level cascade resets this list.
     pub fn reset(&self) {
-        self.servers
-            .lock()
-            .expect("TryList mutex poisoned")
-            .clear();
+        self.servers.lock().expect("TryList mutex poisoned").clear();
     }
 
     /// Remove a single server from the try-list. Used when that server's
@@ -76,18 +73,12 @@ impl TryList {
     /// Snapshot of the current set. Copy: uses the lock briefly, then hands
     /// back an owned `HashSet`. For use in logging/telemetry.
     pub fn snapshot(&self) -> HashSet<String> {
-        self.servers
-            .lock()
-            .expect("TryList mutex poisoned")
-            .clone()
+        self.servers.lock().expect("TryList mutex poisoned").clone()
     }
 
     /// Number of servers currently in the list.
     pub fn len(&self) -> usize {
-        self.servers
-            .lock()
-            .expect("TryList mutex poisoned")
-            .len()
+        self.servers.lock().expect("TryList mutex poisoned").len()
     }
 
     /// Is the list empty?

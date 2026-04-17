@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use nzb_nntp::connection::{ConnectionState, NntpConnection};
 use nzb_nntp::config::ServerConfig;
+use nzb_nntp::connection::{ConnectionState, NntpConnection};
 use nzb_nntp::error::{NntpError, NntpResult};
 use tracing::{debug, warn};
 

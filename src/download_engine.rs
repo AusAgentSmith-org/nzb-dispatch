@@ -43,11 +43,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use nzb_core::config::ServerConfig;
 use nzb_core::models::NzbJob;
+use nzb_decode::FileAssembler;
+use nzb_decode::yenc::decode_yenc;
 use nzb_nntp::Pipeline;
 use nzb_nntp::connection::NntpConnection;
 use nzb_nntp::error::NntpError;
-use nzb_decode::FileAssembler;
-use nzb_decode::yenc::decode_yenc;
 
 use crate::bandwidth::BandwidthLimiter;
 
@@ -2875,7 +2875,10 @@ mod tests {
         let first = q.pop_workable("srv1", &[]).unwrap();
         assert_eq!(first.job_id, "j1");
         let second = q.pop_workable("srv1", &[]).unwrap();
-        assert_eq!(second.job_id, "j1", "falls back to same job when no sibling");
+        assert_eq!(
+            second.job_id, "j1",
+            "falls back to same job when no sibling"
+        );
     }
 
     #[test]

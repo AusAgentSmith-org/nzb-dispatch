@@ -7,9 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nzb_dispatch::news::article::{Article, NzbFile, NzbObject};
-use nzb_dispatch::news::downloader::{
-    DownloaderConfig, FetchOutcome, WorkItem, spawn_downloader,
-};
+use nzb_dispatch::news::downloader::{DownloaderConfig, FetchOutcome, WorkItem, spawn_downloader};
 use nzb_nntp::testutil::{MockConfig, MockNntpServer, test_config};
 
 /// Drive N work items through the downloader and collect outcomes. Fails
@@ -153,9 +151,7 @@ async fn falls_over_to_backup_when_primary_returns_430() {
 
     let got = run_until_complete(&handle, outcomes, 1, Duration::from_secs(10)).await;
     match &got[0] {
-        FetchOutcome::Success {
-            tag, server_id, ..
-        } => {
+        FetchOutcome::Success { tag, server_id, .. } => {
             assert_eq!(*tag, 42);
             assert_eq!(
                 server_id, "backup",
@@ -206,7 +202,14 @@ async fn multiple_articles_dispatch_concurrently() {
     let job = Arc::new(NzbObject::new("j1", "demo", 10, 2560, vec![file.clone()]));
 
     for i in 0..10u64 {
-        let art = Arc::new(Article::new(format!("msg{i}"), "f1", "j1", 256, i as u32, i));
+        let art = Arc::new(Article::new(
+            format!("msg{i}"),
+            "f1",
+            "j1",
+            256,
+            i as u32,
+            i,
+        ));
         handle
             .submit(WorkItem {
                 tag: i,
@@ -223,7 +226,10 @@ async fn multiple_articles_dispatch_concurrently() {
         .iter()
         .filter(|o| matches!(o, FetchOutcome::Success { .. }))
         .count();
-    assert_eq!(successes, 10, "all ten articles should succeed; got {got:?}");
+    assert_eq!(
+        successes, 10,
+        "all ten articles should succeed; got {got:?}"
+    );
 
     handle.shutdown();
     handle.join().await;
@@ -265,14 +271,7 @@ async fn back_pressure_halts_driver_when_outcomes_are_not_drained() {
     let file = Arc::new(NzbFile::new("f1", "j1", "demo", 10));
     let job = Arc::new(NzbObject::new("j1", "demo", 10, 320, vec![file.clone()]));
     for i in 0..10u64 {
-        let art = Arc::new(Article::new(
-            format!("bp{i}"),
-            "f1",
-            "j1",
-            32,
-            i as u32,
-            i,
-        ));
+        let art = Arc::new(Article::new(format!("bp{i}"), "f1", "j1", 32, i as u32, i));
         handle
             .submit(WorkItem {
                 tag: i,
