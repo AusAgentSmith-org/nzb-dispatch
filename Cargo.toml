@@ -10,6 +10,7 @@ repository = "http://100.92.54.45:3002/indexarr/nzb-dispatch"
 nzb-nntp = { version = "0.2.15", registry = "forgejo" }
 nzb-decode = { version = "0.1.2", registry = "forgejo" }
 nzb-core = { version = "0.2.9", registry = "forgejo" }
+nzb-news = { version = "0.1.0", registry = "forgejo" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

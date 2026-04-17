@@ -18,7 +18,10 @@ pub mod article_failure;
 pub mod bandwidth;
 pub mod dispatch_engine;
 pub mod download_engine;
+pub mod news_engine;
 pub mod util;
+
+pub use news_engine::{NewsDispatchEngine, NewsEngineConfig};
 
 // Convenience re-exports — the types downstream crates reach for.
 pub use article_failure::{ArticleFailure, ArticleFailureKind};

@@ -521,6 +521,17 @@ impl JobContext {
         }
     }
 
+    /// Crate-public accessor for [`resolve_one`](Self::resolve_one). Used
+    /// by alternative `DispatchEngine` impls in sibling modules.
+    pub(crate) fn resolve_one_public(&self) {
+        self.resolve_one();
+    }
+
+    /// Crate-public accessor for [`emit_terminal`](Self::emit_terminal).
+    pub(crate) fn emit_terminal_public(&self) {
+        self.emit_terminal();
+    }
+
     /// Decrement articles_remaining. If it reaches zero, run deobfuscation
     /// and emit the job-finished/aborted terminal update. Idempotent.
     fn resolve_one(&self) {
