@@ -306,17 +306,28 @@ impl DispatchEngine for NewsDispatchEngine {
 
     fn pause_job(&self, job_id: &str) {
         if let Some(entry) = self.inner.jobs.read().get(job_id) {
+            // Local gate — stops the pump from handing new items to nzb-news.
             entry.paused.store(true, Ordering::SeqCst);
-            debug!(job_id, "paused");
         }
+        // Scheduler-level gate — holds already-submitted articles in
+        // nzb-news's own pending queue. Without this, anything already
+        // accepted into `work_channel_capacity` (default 4096) would still
+        // route to servers despite the local gate.
+        if let Some(h) = self.inner.handle.read().as_ref() {
+            h.pause_job(job_id);
+        }
+        debug!(job_id, "paused");
     }
 
     fn resume_job(&self, job_id: &str) {
         if let Some(entry) = self.inner.jobs.read().get(job_id) {
             entry.paused.store(false, Ordering::SeqCst);
             entry.pump_wake.notify_waiters();
-            debug!(job_id, "resumed");
         }
+        if let Some(h) = self.inner.handle.read().as_ref() {
+            h.resume_job(job_id);
+        }
+        debug!(job_id, "resumed");
     }
 
     fn cancel_job(&self, job_id: &str) {
@@ -334,6 +345,13 @@ impl DispatchEngine for NewsDispatchEngine {
                 .in_flight
                 .write()
                 .retain(|_, m| m.job_id != job_id);
+            // Purge nzb-news scheduler-level state: items already accepted
+            // into the downloader's work_channel or pending list get emitted
+            // as Cancelled outcomes and removed. Without this, a cancelled
+            // job would keep routing its buffered articles to servers.
+            if let Some(h) = self.inner.handle.read().as_ref() {
+                h.purge_job(job_id);
+            }
             debug!(job_id, "cancelled");
         }
     }
