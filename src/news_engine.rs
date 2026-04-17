@@ -26,13 +26,13 @@
 //! - `set_max_worker_idle` / `eviction_count` are stubs (no idle-worker
 //!   pool concept in nzb-news).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
-use tokio::sync::mpsc;
+use parking_lot::{Mutex, RwLock};
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, error, info, warn};
 
 use nzb_core::models::NzbJob;
@@ -113,6 +113,19 @@ struct JobEntry {
     /// deobfuscation state, and terminal emit logic. Everything the adapter
     /// needs on the success/failure path is already a field here.
     context: Arc<JobContext>,
+    /// When true, the pump task holds items in `pending` instead of
+    /// forwarding them to the downloader. In-flight articles still
+    /// complete — pause gates the *next* work only.
+    paused: AtomicBool,
+    /// Set by `cancel_job`. The pump exits and drains the queue.
+    cancelled: AtomicBool,
+    /// Work items waiting to be handed to the downloader. `submit_job`
+    /// pushes all items here; the pump task drains on start and on
+    /// resume.
+    pending: Mutex<VecDeque<nzb_news::WorkItem>>,
+    /// Wake-up signal for the pump task. Notified when `submit_job` adds
+    /// items or when `resume_job` / `cancel_job` changes the gate.
+    pump_wake: Notify,
 }
 
 /// Metadata recorded when a `WorkItem` is dispatched so we can route the
@@ -180,17 +193,12 @@ impl DispatchEngine for NewsDispatchEngine {
     }
 
     fn submit_job(&self, job: &NzbJob, progress_tx: mpsc::Sender<ProgressUpdate>) {
-        // Reuse the old engine's job-submission builder. It creates the
+        // Reuse the old engine's job-submission builder: creates the
         // FileAssembler, registers files, and filters out already-downloaded
-        // articles. We only use the returned `JobContext` — the `WorkItem`
+        // articles. We only use the returned `JobContext` — the WorkItem
         // vec it produces is in the old engine's format; we build nzb-news
         // work items fresh below.
         let (ctx, legacy_items) = build_job_submission(job, progress_tx);
-
-        let entry = Arc::new(JobEntry {
-            context: Arc::clone(&ctx),
-        });
-        self.inner.jobs.write().insert(ctx.job_id.clone(), entry);
 
         // Build nzb-news wrapper types. One NzbObject for the job, one
         // NzbFile per file, and one Article per work item.
@@ -219,27 +227,17 @@ impl DispatchEngine for NewsDispatchEngine {
             news_files.clone(),
         ));
 
-        let handle = match self.inner.handle.read().as_ref() {
-            Some(h) => h.clone_tx(),
-            None => {
-                error!(
-                    job_id = %job.id,
-                    "submit_job called before start(); refusing to submit"
-                );
-                return;
-            }
-        };
-
-        // Enqueue every work item into the downloader. We fire-and-forget
-        // via an async task so `submit_job` stays non-blocking; the channel
-        // has back-pressure so we won't lose items.
+        // Convert each legacy WorkItem into an nzb-news WorkItem, recording
+        // the routing metadata into in_flight and the item itself into the
+        // job's pending queue. The pump task forwards from pending to the
+        // downloader, gated by the `paused` flag.
+        let mut pending = VecDeque::with_capacity(legacy_items.len());
         let tag_counter = &self.inner.next_tag;
-        let mut items_to_submit = Vec::with_capacity(legacy_items.len());
         for item in legacy_items {
             let tag = tag_counter.fetch_add(1, Ordering::Relaxed);
             let file = match news_files_by_id.get(&item.file_id) {
                 Some(f) => Arc::clone(f),
-                None => continue, // shouldn't happen
+                None => continue, // shouldn't happen — file_id came from the same job
             };
             self.inner.in_flight.write().insert(
                 tag,
@@ -253,11 +251,11 @@ impl DispatchEngine for NewsDispatchEngine {
                 item.message_id.clone(),
                 item.file_id.clone(),
                 item.job_id.clone(),
-                0, // article byte size — optional, used for stats only
+                0,
                 item.segment_number,
                 tag,
             ));
-            items_to_submit.push(nzb_news::WorkItem {
+            pending.push_back(nzb_news::WorkItem {
                 tag,
                 article,
                 file,
@@ -265,34 +263,56 @@ impl DispatchEngine for NewsDispatchEngine {
             });
         }
 
-        let job_id = job.id.clone();
-        let count = items_to_submit.len();
-        tokio::spawn(async move {
-            for it in items_to_submit {
-                if handle.send(it).await.is_err() {
-                    warn!(job_id = %job_id, "downloader sender closed while enqueuing work");
-                    break;
-                }
-            }
-            debug!(job_id = %job_id, count, "all work items enqueued");
+        let entry = Arc::new(JobEntry {
+            context: Arc::clone(&ctx),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            pending: Mutex::new(pending),
+            pump_wake: Notify::new(),
         });
+        self.inner.jobs.write().insert(ctx.job_id.clone(), Arc::clone(&entry));
+
+        // Get a handle sender before spawning the pump. If start() wasn't
+        // called, we bail here — the caller's contract is to start() first.
+        let sender = match self.inner.handle.read().as_ref() {
+            Some(h) => h.clone_tx(),
+            None => {
+                error!(
+                    job_id = %job.id,
+                    "submit_job called before start(); work will not be dispatched"
+                );
+                return;
+            }
+        };
+
+        let job_id = job.id.clone();
+        tokio::spawn(pump_loop(entry, sender, job_id));
     }
 
-    fn pause_job(&self, _job_id: &str) {
-        // TODO: pause gating. Requires splitting submit_job into a per-job
-        // pending queue + a pump task that releases items to the downloader
-        // only when `paused == false`. For now a no-op so callers don't
-        // panic; in-flight articles will still complete.
-        warn!("NewsDispatchEngine::pause_job is a no-op (MVP)");
+    fn pause_job(&self, job_id: &str) {
+        if let Some(entry) = self.inner.jobs.read().get(job_id) {
+            entry.paused.store(true, Ordering::SeqCst);
+            debug!(job_id, "paused");
+        }
     }
 
-    fn resume_job(&self, _job_id: &str) {
-        warn!("NewsDispatchEngine::resume_job is a no-op (MVP)");
+    fn resume_job(&self, job_id: &str) {
+        if let Some(entry) = self.inner.jobs.read().get(job_id) {
+            entry.paused.store(false, Ordering::SeqCst);
+            entry.pump_wake.notify_waiters();
+            debug!(job_id, "resumed");
+        }
     }
 
     fn cancel_job(&self, job_id: &str) {
         let entry = self.inner.jobs.write().remove(job_id);
-        if entry.is_some() {
+        if let Some(entry) = entry {
+            // Signal pump to drain + exit.
+            entry.cancelled.store(true, Ordering::SeqCst);
+            entry.pump_wake.notify_waiters();
+            // Drop any not-yet-dispatched items so the pump sees an empty
+            // queue and exits promptly.
+            entry.pending.lock().clear();
             // Clear in-flight entries for this job so stale outcomes are
             // dropped silently by the dispatcher (unknown-tag path).
             self.inner
@@ -497,4 +517,45 @@ fn emit_failed(ctx: &JobContext, meta: &InFlight, failure: ArticleFailure) {
         failure,
     });
     ctx.resolve_one_public();
+}
+
+// ---------------------------------------------------------------------------
+// Per-job pump task
+// ---------------------------------------------------------------------------
+
+/// Drains a job's `pending` queue into the downloader's work channel,
+/// respecting the `paused` gate and exiting on `cancelled`.
+///
+/// The pump parks on `pump_wake` when `pending` is empty or when
+/// `paused` is true. `submit_job` / `resume_job` notify to wake it.
+async fn pump_loop(
+    entry: Arc<JobEntry>,
+    sender: mpsc::Sender<nzb_news::WorkItem>,
+    job_id: String,
+) {
+    loop {
+        if entry.cancelled.load(Ordering::SeqCst) {
+            debug!(job_id, "pump exiting: cancelled");
+            return;
+        }
+        if entry.paused.load(Ordering::SeqCst) {
+            // Wait for resume or cancel.
+            entry.pump_wake.notified().await;
+            continue;
+        }
+        let next = entry.pending.lock().pop_front();
+        let Some(item) = next else {
+            // Queue empty. For the current adapter, submit_job enqueues
+            // every article up-front, so an empty queue means we're done.
+            // Leave the pump waiting in case a future enhancement appends
+            // more work (e.g. dynamic NZB growth); cancel will still wake
+            // it. This costs one idle task per running job.
+            entry.pump_wake.notified().await;
+            continue;
+        };
+        if sender.send(item).await.is_err() {
+            warn!(job_id, "downloader sender closed; pump exiting");
+            return;
+        }
+    }
 }
