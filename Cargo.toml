@@ -1,6 +1,6 @@
 [package]
 name = "nzb-dispatch"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Article-level dispatcher: per-server worker pool, priority gating, retry + hopeless tracking. Part of the nzb-* layered usenet engine."
 license = "MIT"
@@ -12,7 +12,6 @@ nzb-decode = { version = "0.1.2", registry = "forgejo" }
 nzb-core = { version = "0.2.9", registry = "forgejo" }
 
 tokio = { version = "1", features = ["full"] }
-futures = "0.3"
 async-trait = "0.1"
 parking_lot = "0.12"
 arc-swap = "1"
