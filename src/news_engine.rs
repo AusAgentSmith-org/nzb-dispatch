@@ -270,7 +270,10 @@ impl DispatchEngine for NewsDispatchEngine {
             pending: Mutex::new(pending),
             pump_wake: Notify::new(),
         });
-        self.inner.jobs.write().insert(ctx.job_id.clone(), Arc::clone(&entry));
+        self.inner
+            .jobs
+            .write()
+            .insert(ctx.job_id.clone(), Arc::clone(&entry));
 
         // Get a handle sender before spawning the pump. If start() wasn't
         // called, we bail here — the caller's contract is to start() first.
@@ -427,8 +430,7 @@ fn process_success(inner: &Inner, tag: u64, server_id: String, raw: Vec<u8>) {
     let decoded = match nzb_decode::decode_yenc(&raw) {
         Ok(d) => d,
         Err(e) => {
-            let failure =
-                ArticleFailure::decode_error(server_id, format!("yEnc decode: {e}"));
+            let failure = ArticleFailure::decode_error(server_id, format!("yEnc decode: {e}"));
             emit_failed(ctx, &meta, failure);
             return;
         }
@@ -468,8 +470,7 @@ fn process_success(inner: &Inner, tag: u64, server_id: String, raw: Vec<u8>) {
     ctx.total_decode_us.fetch_add(decode_us, Ordering::Relaxed);
     ctx.total_assemble_us
         .fetch_add(assemble_us, Ordering::Relaxed);
-    ctx.total_articles_decoded
-        .fetch_add(1, Ordering::Relaxed);
+    ctx.total_articles_decoded.fetch_add(1, Ordering::Relaxed);
 
     // Emit progress.
     let decoded_bytes = decoded.data.len() as u64;
@@ -528,11 +529,7 @@ fn emit_failed(ctx: &JobContext, meta: &InFlight, failure: ArticleFailure) {
 ///
 /// The pump parks on `pump_wake` when `pending` is empty or when
 /// `paused` is true. `submit_job` / `resume_job` notify to wake it.
-async fn pump_loop(
-    entry: Arc<JobEntry>,
-    sender: mpsc::Sender<nzb_news::WorkItem>,
-    job_id: String,
-) {
+async fn pump_loop(entry: Arc<JobEntry>, sender: mpsc::Sender<nzb_news::WorkItem>, job_id: String) {
     loop {
         if entry.cancelled.load(Ordering::SeqCst) {
             debug!(job_id, "pump exiting: cancelled");

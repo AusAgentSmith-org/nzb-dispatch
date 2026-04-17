@@ -28,14 +28,7 @@ use nzb_nntp::testutil::{MockConfig, MockNntpServer, test_config};
 
 fn yenc_encode(filename: &str, payload: &[u8]) -> Vec<u8> {
     // Single-part article; file_offset=0, total_file_size=payload.len().
-    let (body, _crc) = yenc_simd::encode_article(
-        payload,
-        filename,
-        1,
-        1,
-        0,
-        payload.len() as u64,
-    );
+    let (body, _crc) = yenc_simd::encode_article(payload, filename, 1, 1, 0, payload.len() as u64);
     body
 }
 
