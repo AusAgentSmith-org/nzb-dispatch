@@ -67,9 +67,30 @@ pub trait DispatchEngine: Send + Sync {
     /// worker. Useful for tests and observability.
     fn eviction_count(&self) -> u64;
 
+    /// Snapshot of per-server lifetime attempt counters. Used by the
+    /// queue manager to emit a diagnostic breakdown alongside a job abort
+    /// — distinguishes "server returned 430 for every article" (dead NZB)
+    /// from "server had auth errors" (transient). Default is empty for
+    /// engines that don't track per-server stats.
+    fn server_stats_snapshot(&self) -> Vec<(String, ServerAttemptStats)> {
+        Vec::new()
+    }
+
     /// Gracefully shut down: stop accepting new work, signal all workers,
     /// and wait for the supervisor to exit.
     async fn shutdown(&self);
+}
+
+/// Per-server lifetime counters reported via
+/// [`DispatchEngine::server_stats_snapshot`]. `not_found` is the strongest
+/// signal for a dead NZB; `transient_failed` separates "missing articles"
+/// from "server flaky / auth issues".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ServerAttemptStats {
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub not_found: u64,
+    pub transient_failed: u64,
 }
 
 // ---------------------------------------------------------------------------

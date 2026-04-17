@@ -387,6 +387,27 @@ impl DispatchEngine for NewsDispatchEngine {
         0
     }
 
+    fn server_stats_snapshot(&self) -> Vec<(String, crate::dispatch_engine::ServerAttemptStats)> {
+        let guard = self.inner.handle.read();
+        let Some(h) = guard.as_ref() else {
+            return Vec::new();
+        };
+        h.server_stats_snapshot()
+            .into_iter()
+            .map(|(id, s)| {
+                (
+                    id,
+                    crate::dispatch_engine::ServerAttemptStats {
+                        attempted: s.attempted,
+                        succeeded: s.succeeded,
+                        not_found: s.not_found,
+                        transient_failed: s.transient_failed,
+                    },
+                )
+            })
+            .collect()
+    }
+
     async fn shutdown(&self) {
         let handle = self.inner.handle.write().take();
         if let Some(h) = handle {
