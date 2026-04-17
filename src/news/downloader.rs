@@ -148,16 +148,6 @@ impl ServerQueue {
         })
     }
 
-    async fn push(&self, item: WorkItem) {
-        self.deque.lock().await.push_back(item);
-        // notify_waiters wakes ALL currently-parked workers; each will
-        // compete for the lock, one gets the item, the rest re-park.
-        // Using notify_one would serialize wake-ups since
-        // tokio::sync::Notify only buffers a single permit — any extra
-        // notify_one calls between wakeups are lost.
-        self.notify.notify_waiters();
-    }
-
     /// Batched push: enqueue `items` in a single mutex cycle. Much
     /// cheaper than N individual `push` calls when the scheduler has
     /// drained many items from `work_rx` in one burst, and critically
