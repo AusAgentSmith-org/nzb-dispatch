@@ -24,12 +24,14 @@ thiserror = "2"
 unicode-normalization = "0.1"
 
 [dev-dependencies]
-nzb-nntp = { version = "0.2.14", registry = "forgejo", features = ["test-support"] }
+nzb-nntp = { version = "0.2.15", registry = "forgejo", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 serial_test = "3"
+yenc-simd = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
