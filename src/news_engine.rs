@@ -398,7 +398,14 @@ async fn outcome_dispatcher(
                 bytes,
                 article_bytes: _,
             } => {
-                process_success(&inner, tag, server_id, bytes);
+                // Spawn each success so decode+assemble runs in parallel.
+                // The old engine got this for free because every worker did
+                // its own fetch+decode+assemble — centralising here would
+                // serialise all post-fetch work to a single task.
+                let inner2 = Arc::clone(&inner);
+                tokio::spawn(async move {
+                    process_success(inner2, tag, server_id, bytes).await;
+                });
             }
             nzb_news::FetchOutcome::Failed { tag, last_error } => {
                 process_failure(&inner, tag, last_error);
@@ -413,7 +420,7 @@ async fn outcome_dispatcher(
     debug!("outcome_dispatcher exiting: channel closed");
 }
 
-fn process_success(inner: &Inner, tag: u64, server_id: String, raw: Vec<u8>) {
+async fn process_success(inner: Arc<Inner>, tag: u64, server_id: String, raw: Vec<u8>) {
     let meta = inner.in_flight.write().remove(&tag);
     let Some(meta) = meta else {
         return; // stale / cancelled
@@ -425,7 +432,7 @@ fn process_success(inner: &Inner, tag: u64, server_id: String, raw: Vec<u8>) {
     };
     let ctx = &entry.context;
 
-    // Decode.
+    // Decode (CPU-bound; SIMD is fast but not free).
     let decode_start = Instant::now();
     let decoded = match nzb_decode::decode_yenc(&raw) {
         Ok(d) => d,
