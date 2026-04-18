@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Notify, mpsc};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use nzb_core::models::NzbJob;
 use nzb_nntp::config::ServerConfig;
@@ -64,9 +64,13 @@ const DEFAULT_OUTCOME_CHANNEL_CAPACITY: usize = 4096;
 
 /// Configuration for [`NewsDispatchEngine`]. Mirrors the knobs exposed by
 /// the old engine so the swap is drop-in from the caller's perspective.
+///
+/// `servers` is held as an `Arc<Mutex<_>>` so the caller (queue manager) can
+/// mutate it and [`DispatchEngine::reconcile_servers`] will pick up the new
+/// list without requiring a new config instance or a full engine rebuild.
 #[derive(Clone)]
 pub struct NewsEngineConfig {
-    pub servers: Vec<ServerConfig>,
+    pub servers: Arc<Mutex<Vec<ServerConfig>>>,
     pub article_timeout: Duration,
     pub max_concurrent_fetches: usize,
     pub work_channel_capacity: usize,
@@ -84,7 +88,24 @@ pub struct NewsEngineConfig {
 }
 
 impl NewsEngineConfig {
+    /// Construct a config from an owned server list. Wraps the list in an
+    /// `Arc<Mutex<_>>` internally; if the caller already owns a shared Arc
+    /// (e.g. queue manager's live server list), use
+    /// [`NewsEngineConfig::with_shared_servers`] instead so mutations are
+    /// visible to the engine.
     pub fn new(servers: Vec<ServerConfig>, article_timeout: Duration) -> Self {
+        Self::with_shared_servers(Arc::new(Mutex::new(servers)), article_timeout)
+    }
+
+    /// Construct a config sharing an existing `Arc<Mutex<Vec<ServerConfig>>>`
+    /// with the caller. Mutating the Arc from outside and then calling
+    /// [`DispatchEngine::reconcile_servers`] rebuilds the downloader with
+    /// the latest server list — this is how live "add/remove server"
+    /// operations reach the fetch layer.
+    pub fn with_shared_servers(
+        servers: Arc<Mutex<Vec<ServerConfig>>>,
+        article_timeout: Duration,
+    ) -> Self {
         Self {
             servers,
             article_timeout,
@@ -181,27 +202,16 @@ impl DispatchEngine for NewsDispatchEngine {
             return; // idempotent
         }
 
-        let cfg = &self.inner.config;
-        let dl_config = nzb_news::DownloaderConfig {
-            servers: cfg.servers.clone(),
-            max_concurrent_fetches: cfg.max_concurrent_fetches,
-            article_timeout: cfg.article_timeout,
-            work_channel_capacity: cfg.work_channel_capacity,
-            outcome_channel_capacity: cfg.outcome_channel_capacity,
-            probe_policy: cfg.probe_policy.clone(),
-        };
-        let (handle, outcomes) = nzb_news::spawn_downloader(dl_config);
-
-        // Spawn the outcome dispatcher. It lives as long as the downloader's
-        // outcome channel is open — shutdown closes it and the loop exits.
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(outcome_dispatcher(inner, outcomes));
-
-        *slot = Some(handle);
-        info!(
-            servers = self.inner.config.servers.len(),
-            "NewsDispatchEngine started"
-        );
+        let servers_snapshot = self.inner.config.servers.lock().clone();
+        if servers_snapshot.is_empty() {
+            // Deferred start: with zero servers, spawning the downloader
+            // would create an internal work queue with no per-server
+            // workers, and any items pushed would sit in limbo.
+            // `reconcile_servers` will start it once servers are added.
+            info!("NewsDispatchEngine start deferred — no servers configured");
+            return;
+        }
+        spawn_and_install_downloader(&self.inner, &mut slot, servers_snapshot);
     }
 
     fn submit_job(&self, job: &NzbJob, progress_tx: mpsc::Sender<ProgressUpdate>) {
@@ -287,21 +297,13 @@ impl DispatchEngine for NewsDispatchEngine {
             .write()
             .insert(ctx.job_id.clone(), Arc::clone(&entry));
 
-        // Get a handle sender before spawning the pump. If start() wasn't
-        // called, we bail here — the caller's contract is to start() first.
-        let sender = match self.inner.handle.read().as_ref() {
-            Some(h) => h.clone_tx(),
-            None => {
-                error!(
-                    job_id = %job.id,
-                    "submit_job called before start(); work will not be dispatched"
-                );
-                return;
-            }
-        };
-
+        // Spawn the pump. It acquires a sender from the engine handle on
+        // each iteration and parks if the downloader is absent — so
+        // submitting a job before `start()` (or during a 0-server startup
+        // window) is safe: items wait in `pending` until `reconcile_servers`
+        // spawns the downloader.
         let job_id = job.id.clone();
-        tokio::spawn(pump_loop(entry, sender, job_id));
+        tokio::spawn(pump_loop(entry, Arc::clone(&self.inner), job_id));
     }
 
     fn pause_job(&self, job_id: &str) {
@@ -373,9 +375,55 @@ impl DispatchEngine for NewsDispatchEngine {
     }
 
     fn reconcile_servers(&self) {
-        // TODO: nzb-news doesn't expose dynamic server reconfiguration; a
-        // full reconcile requires a downloader restart. Defer until we have
-        // a concrete need from the queue manager tests.
+        // Rebuild the downloader with the current server list.
+        //
+        // First-time (0 → N): when `start` was deferred for lack of
+        // servers, pump_loops parked waiting for a handle. Spawning the
+        // downloader here and notifying pumps resumes dispatch cleanly —
+        // no items are lost because `pump_loop` leaves unsent items in
+        // `pending` until a sender is available.
+        //
+        // Reconfigure (N → M, N > 0): the downloader is rebuilt and the
+        // old one shut down. Articles already in the old downloader's
+        // internal queue that had not completed may be lost; their job
+        // will stall until nzb-news grows a dynamic-server API. For the
+        // common "add/edit server" UI flows this is rare in practice and
+        // the user can retry a stalled job manually. Documented as a
+        // limitation rather than a silent partial failure.
+        let servers_snapshot = self.inner.config.servers.lock().clone();
+        let server_count = servers_snapshot.len();
+
+        let old_handle = if servers_snapshot.is_empty() {
+            // Remove handle; pumps will park until a server is added.
+            self.inner.handle.write().take()
+        } else {
+            let mut slot = self.inner.handle.write();
+            let old = slot.take();
+            spawn_and_install_downloader(&self.inner, &mut slot, servers_snapshot);
+            old
+        };
+
+        if let Some(old) = old_handle {
+            old.shutdown();
+        }
+
+        // Wake all pump loops so they re-read the handle and either pick
+        // up the new sender or park on `pump_wake` until one arrives.
+        let entries: Vec<Arc<JobEntry>> = self
+            .inner
+            .jobs
+            .read()
+            .values()
+            .map(Arc::clone)
+            .collect();
+        for entry in entries {
+            entry.pump_wake.notify_waiters();
+        }
+
+        info!(
+            servers = server_count,
+            "NewsDispatchEngine reconciled server list"
+        );
     }
 
     fn set_max_worker_idle(&self, _d: Duration) {
@@ -414,19 +462,6 @@ impl DispatchEngine for NewsDispatchEngine {
             h.shutdown();
             h.join().await;
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper trait: pull the work-submission sender out of DownloaderHandle
-// ---------------------------------------------------------------------------
-
-trait HandleExt {
-    fn clone_tx(&self) -> mpsc::Sender<nzb_news::WorkItem>;
-}
-impl HandleExt for nzb_news::DownloaderHandle {
-    fn clone_tx(&self) -> mpsc::Sender<nzb_news::WorkItem> {
-        self.sender()
     }
 }
 
@@ -587,30 +622,71 @@ fn emit_failed(ctx: &JobContext, meta: &InFlight, failure: ArticleFailure) {
 ///
 /// The pump parks on `pump_wake` when `pending` is empty or when
 /// `paused` is true. `submit_job` / `resume_job` notify to wake it.
-async fn pump_loop(entry: Arc<JobEntry>, sender: mpsc::Sender<nzb_news::WorkItem>, job_id: String) {
+async fn pump_loop(entry: Arc<JobEntry>, inner: Arc<Inner>, job_id: String) {
     loop {
         if entry.cancelled.load(Ordering::SeqCst) {
             debug!(job_id, "pump exiting: cancelled");
             return;
         }
         if entry.paused.load(Ordering::SeqCst) {
-            // Wait for resume or cancel.
             entry.pump_wake.notified().await;
             continue;
         }
         let next = entry.pending.lock().pop_front();
         let Some(item) = next else {
-            // Queue empty. For the current adapter, submit_job enqueues
-            // every article up-front, so an empty queue means we're done.
-            // Leave the pump waiting in case a future enhancement appends
-            // more work (e.g. dynamic NZB growth); cancel will still wake
-            // it. This costs one idle task per running job.
+            // Queue empty. submit_job enqueues every article up-front, so
+            // an empty queue means we're done. Park anyway so cancel can
+            // wake us.
             entry.pump_wake.notified().await;
             continue;
         };
-        if sender.send(item).await.is_err() {
-            warn!(job_id, "downloader sender closed; pump exiting");
-            return;
+
+        // Snapshot the current sender. If the downloader is absent (not
+        // started yet, or torn down during reconcile_servers with zero
+        // servers), stash the item back on the front of `pending` and
+        // park; reconcile_servers will notify us when a new handle exists.
+        let sender = inner.handle.read().as_ref().map(|h| h.sender());
+        let Some(sender) = sender else {
+            entry.pending.lock().push_front(item);
+            entry.pump_wake.notified().await;
+            continue;
+        };
+
+        // Send. On SendError (sender closed mid-reconcile), return the
+        // item to the queue and park — the new handle is on its way.
+        if let Err(e) = sender.send(item).await {
+            entry.pending.lock().push_front(e.0);
+            entry.pump_wake.notified().await;
+            continue;
         }
     }
+}
+
+/// Build a new `DownloaderConfig` from the engine's static knobs plus the
+/// given server list, spawn the downloader, install its handle in `slot`,
+/// and launch the outcome dispatcher task. Used by both `start()` and
+/// `reconcile_servers` to avoid duplicating the construction.
+///
+/// Precondition: `servers` is non-empty; caller decides the zero-server
+/// policy. `slot` must already be held under a write lock.
+fn spawn_and_install_downloader(
+    inner: &Arc<Inner>,
+    slot: &mut Option<nzb_news::DownloaderHandle>,
+    servers: Vec<ServerConfig>,
+) {
+    let cfg = &inner.config;
+    let server_count = servers.len();
+    let dl_config = nzb_news::DownloaderConfig {
+        servers,
+        max_concurrent_fetches: cfg.max_concurrent_fetches,
+        article_timeout: cfg.article_timeout,
+        work_channel_capacity: cfg.work_channel_capacity,
+        outcome_channel_capacity: cfg.outcome_channel_capacity,
+        probe_policy: cfg.probe_policy.clone(),
+    };
+    let (handle, outcomes) = nzb_news::spawn_downloader(dl_config);
+    let inner_for_task = Arc::clone(inner);
+    tokio::spawn(outcome_dispatcher(inner_for_task, outcomes));
+    *slot = Some(handle);
+    info!(servers = server_count, "NewsDispatchEngine downloader spawned");
 }
