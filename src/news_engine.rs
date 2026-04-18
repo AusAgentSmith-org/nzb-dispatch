@@ -589,17 +589,92 @@ fn process_failure(inner: &Inner, tag: u64, last_error: Option<String>) {
         return;
     };
     let msg = last_error.unwrap_or_else(|| "all servers exhausted".into());
-    // nzb-news doesn't expose per-server failure classification at the
-    // outcome layer; it only tells us an article was given up on. Map to
-    // `NotFound` (the closest analogue the hopeless-tracker cares about)
-    // with the error string for diagnostics. server_id is empty because
-    // the outcome aggregates across every tried server.
+    // nzb-news doesn't carry structured error info at the outcome layer —
+    // only the last attempt's error string. Pattern-match common causes
+    // so the hopeless-tracker and queue_manager can distinguish "server
+    // is broken/quota-exhausted" (transient, don't count toward hopeless)
+    // from "article genuinely missing everywhere" (counts toward
+    // hopeless). Without this, an auth/quota failure trickles through as
+    // NotFound and aborts the job with "articles confirmed missing" —
+    // confusing diagnostics that blame the content instead of the server.
+    let kind = classify_error_message(&msg);
     let failure = ArticleFailure {
-        kind: ArticleFailureKind::NotFound,
+        kind,
         server_id: String::new(),
         message: msg,
     };
     emit_failed(&entry.context, &meta, failure);
+}
+
+/// Map an opaque nzb-news error string to a typed [`ArticleFailureKind`].
+///
+/// The strings come from `nzb_nntp::error::NntpError` (via nzb-news) and are
+/// the only signal we have at this layer — nzb-news's `FetchOutcome` carries
+/// `Option<String>` rather than a structured kind. Order of checks matters:
+/// more specific patterns are tested first.
+fn classify_error_message(msg: &str) -> ArticleFailureKind {
+    let m = msg.to_ascii_lowercase();
+    // NNTP response codes in the message body are the strongest signal.
+    if m.contains("(482)") || m.contains("(481)") || m.contains("auth") {
+        return ArticleFailureKind::AuthFailed;
+    }
+    if m.contains("(403)") || m.contains("permission") || m.contains("forbidden") {
+        return ArticleFailureKind::PermissionDenied;
+    }
+    if m.contains("(430)") || m.contains("article not found") || m.contains("no such article") {
+        return ArticleFailureKind::NotFound;
+    }
+    if m.contains("(502)") || m.contains("service unavailable") {
+        return ArticleFailureKind::ServerDown;
+    }
+    if m.contains("timeout") || m.contains("timed out") {
+        return ArticleFailureKind::Timeout;
+    }
+    if m.contains("connection") || m.contains("eof") || m.contains("reset") || m.contains("closed")
+    {
+        return ArticleFailureKind::ConnectionClosed;
+    }
+    // Default: treat unknown cascade exhaustion as NotFound — same as the
+    // old behaviour — so genuinely-missing articles still abort hopeless
+    // NZBs promptly.
+    ArticleFailureKind::NotFound
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_auth_failures() {
+        let msg = "Authentication failed: PASS rejected (482): Your block account is fully used";
+        assert_eq!(classify_error_message(msg), ArticleFailureKind::AuthFailed);
+    }
+
+    #[test]
+    fn classifies_not_found() {
+        let msg = "NNTP (430) No such article";
+        assert_eq!(classify_error_message(msg), ArticleFailureKind::NotFound);
+    }
+
+    #[test]
+    fn classifies_service_unavailable() {
+        let msg = "Service unavailable (502)";
+        assert_eq!(classify_error_message(msg), ArticleFailureKind::ServerDown);
+    }
+
+    #[test]
+    fn classifies_timeout() {
+        let msg = "read timed out after 60s";
+        assert_eq!(classify_error_message(msg), ArticleFailureKind::Timeout);
+    }
+
+    #[test]
+    fn unknown_defaults_to_not_found() {
+        assert_eq!(
+            classify_error_message("all servers exhausted"),
+            ArticleFailureKind::NotFound
+        );
+    }
 }
 
 fn emit_failed(ctx: &JobContext, meta: &InFlight, failure: ArticleFailure) {

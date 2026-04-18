@@ -1,6 +1,6 @@
 [package]
 name = "nzb-dispatch"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Article-level dispatcher: per-server worker pool, priority gating, retry + hopeless tracking. Part of the nzb-* layered usenet engine."
 license = "MIT"
