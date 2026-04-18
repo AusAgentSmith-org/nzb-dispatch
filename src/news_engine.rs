@@ -409,13 +409,7 @@ impl DispatchEngine for NewsDispatchEngine {
 
         // Wake all pump loops so they re-read the handle and either pick
         // up the new sender or park on `pump_wake` until one arrives.
-        let entries: Vec<Arc<JobEntry>> = self
-            .inner
-            .jobs
-            .read()
-            .values()
-            .map(Arc::clone)
-            .collect();
+        let entries: Vec<Arc<JobEntry>> = self.inner.jobs.read().values().map(Arc::clone).collect();
         for entry in entries {
             entry.pump_wake.notify_waiters();
         }
@@ -763,5 +757,8 @@ fn spawn_and_install_downloader(
     let inner_for_task = Arc::clone(inner);
     tokio::spawn(outcome_dispatcher(inner_for_task, outcomes));
     *slot = Some(handle);
-    info!(servers = server_count, "NewsDispatchEngine downloader spawned");
+    info!(
+        servers = server_count,
+        "NewsDispatchEngine downloader spawned"
+    );
 }
