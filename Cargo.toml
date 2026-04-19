@@ -4,13 +4,14 @@ version = "0.2.4"
 edition = "2024"
 description = "Article-level dispatcher: per-server worker pool, priority gating, retry + hopeless tracking. Part of the nzb-* layered usenet engine."
 license = "MIT"
-repository = "http://100.92.54.45:3002/indexarr/nzb-dispatch"
+repository = "https://github.com/AusAgentSmith-org/nzb-dispatch"
+readme = "README.md"
 
 [dependencies]
-nzb-nntp = { version = "0.2.17", registry = "forgejo" }
-nzb-decode = { version = "0.1.2", registry = "forgejo" }
-nzb-core = { version = "0.2.9", registry = "forgejo" }
-nzb-news = { version = "0.1.9", registry = "forgejo" }
+nzb-nntp = { version = "0.2.17" }
+nzb-decode = { version = "0.1.2" }
+nzb-core = { version = "0.2.9" }
+nzb-news = { version = "0.1.9" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -24,7 +25,7 @@ thiserror = "2"
 unicode-normalization = "0.1"
 
 [dev-dependencies]
-nzb-nntp = { version = "0.2.17", registry = "forgejo", features = ["test-support"] }
+nzb-nntp = { version = "0.2.17", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
