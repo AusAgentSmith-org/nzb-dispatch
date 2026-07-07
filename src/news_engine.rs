@@ -19,10 +19,6 @@
 //! channel, deobfuscation state, and terminal-emit logic).
 //!
 //! MVP limitations — marked with TODO comments:
-//! - `pause_job` / `resume_job` are no-ops (work items are submitted
-//!   eagerly; pause-gating is a follow-up).
-//! - `reconcile_servers` is a no-op (nzb-news doesn't expose mid-flight
-//!   server reconfiguration yet; requires a downloader rebuild).
 //! - `set_max_worker_idle` / `eviction_count` are stubs (no idle-worker
 //!   pool concept in nzb-news).
 
@@ -167,6 +163,7 @@ struct InFlight {
     job_id: String,
     file_id: String,
     segment_number: u32,
+    work_item: nzb_news::WorkItem,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,14 +258,6 @@ impl DispatchEngine for NewsDispatchEngine {
                 Some(f) => Arc::clone(f),
                 None => continue, // shouldn't happen — file_id came from the same job
             };
-            self.inner.in_flight.write().insert(
-                tag,
-                InFlight {
-                    job_id: item.job_id.clone(),
-                    file_id: item.file_id.clone(),
-                    segment_number: item.segment_number,
-                },
-            );
             let article = Arc::new(nzb_news::Article::new(
                 item.message_id.clone(),
                 item.file_id.clone(),
@@ -277,12 +266,22 @@ impl DispatchEngine for NewsDispatchEngine {
                 item.segment_number,
                 tag,
             ));
-            pending.push_back(nzb_news::WorkItem {
+            let pending_item = nzb_news::WorkItem {
                 tag,
                 article,
                 file,
                 job: Arc::clone(&news_job),
-            });
+            };
+            self.inner.in_flight.write().insert(
+                tag,
+                InFlight {
+                    job_id: item.job_id.clone(),
+                    file_id: item.file_id.clone(),
+                    segment_number: item.segment_number,
+                    work_item: pending_item.clone(),
+                },
+            );
+            pending.push_back(pending_item);
         }
 
         let entry = Arc::new(JobEntry {
@@ -383,13 +382,11 @@ impl DispatchEngine for NewsDispatchEngine {
         // no items are lost because `pump_loop` leaves unsent items in
         // `pending` until a sender is available.
         //
-        // Reconfigure (N → M, N > 0): the downloader is rebuilt and the
-        // old one shut down. Articles already in the old downloader's
-        // internal queue that had not completed may be lost; their job
-        // will stall until nzb-news grows a dynamic-server API. For the
-        // common "add/edit server" UI flows this is rare in practice and
-        // the user can retry a stalled job manually. Documented as a
-        // limitation rather than a silent partial failure.
+        // Reconfigure (N → M, N > 0): rebuild the downloader and shut the
+        // old one down. Any not-yet-attempted items from the old downloader
+        // come back through `FetchOutcome::Cancelled`; the outcome adapter
+        // requeues them onto the job's pending queue so the new downloader
+        // can pick them up.
         let servers_snapshot = self.inner.config.servers.lock().clone();
         let server_count = servers_snapshot.len();
 
@@ -491,13 +488,30 @@ async fn outcome_dispatcher(
                 process_failure(&inner, tag, last_error);
             }
             nzb_news::FetchOutcome::Cancelled { tag } => {
-                // Treat as benign discard — caller (queue manager) will
-                // observe JobAborted separately via abort_job.
-                inner.in_flight.write().remove(&tag);
+                requeue_cancelled_outcome(&inner, tag);
             }
         }
     }
     debug!("outcome_dispatcher exiting: channel closed");
+}
+
+fn requeue_cancelled_outcome(inner: &Arc<Inner>, tag: u64) {
+    let Some(meta) = inner.in_flight.write().remove(&tag) else {
+        return;
+    };
+
+    let entry = inner.jobs.read().get(&meta.job_id).cloned();
+    let Some(entry) = entry else {
+        return;
+    };
+
+    if entry.cancelled.load(Ordering::SeqCst) {
+        return;
+    }
+
+    inner.in_flight.write().insert(tag, meta.clone());
+    entry.pending.lock().push_back(meta.work_item);
+    entry.pump_wake.notify_waiters();
 }
 
 async fn process_success(inner: Arc<Inner>, tag: u64, server_id: String, raw: Vec<u8>) {
@@ -761,4 +775,103 @@ fn spawn_and_install_downloader(
         servers = server_count,
         "NewsDispatchEngine downloader spawned"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use chrono::Utc;
+    use nzb_core::models::{JobStatus, NzbFile, NzbJob, Priority};
+    use nzb_nntp::Article;
+    use tokio::sync::mpsc;
+
+    fn sample_job() -> NzbJob {
+        NzbJob {
+            id: "job-1".to_string(),
+            name: "sample".to_string(),
+            category: "tv".to_string(),
+            status: JobStatus::Downloading,
+            priority: Priority::Normal,
+            total_bytes: 128,
+            downloaded_bytes: 0,
+            file_count: 1,
+            files_completed: 0,
+            article_count: 1,
+            articles_downloaded: 0,
+            articles_failed: 0,
+            added_at: Utc::now(),
+            completed_at: None,
+            work_dir: tempfile::tempdir().unwrap().keep(),
+            output_dir: tempfile::tempdir().unwrap().keep(),
+            password: None,
+            error_message: None,
+            speed_bps: 0,
+            server_stats: Vec::new(),
+            files: vec![NzbFile {
+                id: "file-1".to_string(),
+                filename: "file.bin".to_string(),
+                bytes: 128,
+                bytes_downloaded: 0,
+                is_par2: false,
+                par2_setname: None,
+                par2_vol: None,
+                par2_blocks: None,
+                assembled: false,
+                groups: vec!["alt.binaries.test".to_string()],
+                articles: vec![Article {
+                    message_id: "<seg1@example>".to_string(),
+                    bytes: 128,
+                    segment_number: 1,
+                    downloaded: false,
+                    data_begin: None,
+                    data_size: None,
+                    crc32: None,
+                    tried_servers: Vec::new(),
+                    tries: 0,
+                }],
+            }],
+        }
+    }
+
+    fn submitted_engine() -> (NewsDispatchEngine, u64) {
+        let engine = NewsDispatchEngine::new(NewsEngineConfig::new(
+            Vec::<ServerConfig>::new(),
+            Duration::from_secs(30),
+        ));
+        let (tx, _rx) = mpsc::channel(8);
+        engine.submit_job(&sample_job(), tx);
+        let tag = *engine.inner.in_flight.read().keys().next().unwrap();
+        (engine, tag)
+    }
+
+    #[tokio::test]
+    async fn cancelled_outcome_requeues_live_job_item() {
+        let (engine, tag) = submitted_engine();
+        let entry = engine.inner.jobs.read().get("job-1").cloned().unwrap();
+
+        let original = entry.pending.lock().pop_front().unwrap();
+        assert_eq!(original.tag, tag);
+        assert!(entry.pending.lock().is_empty());
+
+        requeue_cancelled_outcome(&engine.inner, tag);
+
+        let queued = entry.pending.lock().pop_front().unwrap();
+        assert_eq!(queued.tag, tag);
+        assert!(engine.inner.in_flight.read().contains_key(&tag));
+    }
+
+    #[tokio::test]
+    async fn cancelled_outcome_drops_when_job_was_cancelled() {
+        let (engine, tag) = submitted_engine();
+        let entry = engine.inner.jobs.read().get("job-1").cloned().unwrap();
+
+        entry.pending.lock().pop_front().unwrap();
+        entry.cancelled.store(true, Ordering::SeqCst);
+
+        requeue_cancelled_outcome(&engine.inner, tag);
+
+        assert!(entry.pending.lock().is_empty());
+        assert!(!engine.inner.in_flight.read().contains_key(&tag));
+    }
 }
