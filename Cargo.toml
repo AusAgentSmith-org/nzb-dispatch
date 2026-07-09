@@ -1,6 +1,6 @@
 [package]
 name = "nzb-dispatch"
-version = "0.2.4"
+version = "0.2.6"
 edition = "2024"
 description = "Article-level dispatcher: per-server worker pool, priority gating, retry + hopeless tracking. Part of the nzb-* layered usenet engine."
 license = "MIT"
@@ -10,8 +10,8 @@ readme = "README.md"
 [dependencies]
 nzb-nntp = { version = "0.2.17" }
 nzb-decode = { version = "0.1.2" }
-nzb-core = { version = "0.2.9" }
-nzb-news = { version = "0.1.9" }
+nzb-core = { version = "0.2.16" }
+nzb-news = { version = "0.1.12" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -39,5 +39,4 @@ all = { level = "warn", priority = -1 }
 
 [lints.rust]
 unused = "warn"
-
 

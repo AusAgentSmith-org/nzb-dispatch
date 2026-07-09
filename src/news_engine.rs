@@ -635,6 +635,7 @@ fn classify_error_message(msg: &str) -> ArticleFailureKind {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod classify_tests {
     use super::*;
 
