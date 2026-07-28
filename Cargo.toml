@@ -30,7 +30,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
-serial_test = "3"
+serial_test = "4"
 yenc-simd = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 
