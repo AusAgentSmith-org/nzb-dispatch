@@ -18,7 +18,7 @@ parking_lot = "0.12"
 arc-swap = "1"
 governor = "0.10"
 tracing = "0.1"
-opentelemetry = "0.28"
+opentelemetry = "0.32"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
